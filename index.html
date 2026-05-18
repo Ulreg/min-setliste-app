@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <title>Setliste Planner Pro</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #1a1a1a; color: #eee; display: flex; flex-direction: column; height: 100vh; margin: 0; }
+        header { background: #2c2c2c; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #444; }
+        .container { display: flex; flex: 1; overflow: hidden; gap: 20px; padding: 20px; }
+        
+        .column { background: #252525; flex: 1; display: flex; flex-direction: column; border-radius: 8px; border: 1px solid #444; }
+        .column h2 { padding: 15px; margin: 0; background: #333; border-radius: 8px 8px 0 0; font-size: 1rem; text-transform: uppercase; letter-spacing: 1px; }
+        .list { flex: 1; overflow-y: auto; padding: 10px; min-height: 200px; }
+
+        .item { background: #333; margin-bottom: 8px; padding: 12px; border-radius: 4px; cursor: grab; border: 1px solid #444; display: flex; justify-content: space-between; align-items: center; transition: 0.2s; }
+        .item:hover { border-color: #007bff; background: #3d3d3d; }
+        .item.pause { background: #4d4010; border-color: #6d5a1a; font-style: italic; }
+        
+        .item-left { display: flex; align-items: center; gap: 10px; }
+        .delete-btn { color: #ff4d4d; cursor: pointer; font-weight: bold; font-size: 1.2rem; padding: 0 5px; transition: 0.2s; user-select: none; }
+        .delete-btn:hover { color: #ff1a1a; transform: scale(1.2); }
+        
+        .duration { font-family: monospace; font-weight: bold; color: #007bff; font-size: 1.1rem; }
+        
+        .controls { padding: 15px; background: #2c2c2c; display: flex; gap: 10px; border-top: 1px solid #444; }
+        input { background: #1a1a1a; border: 1px solid #444; color: white; padding: 10px; border-radius: 4px; flex: 1; }
+        .btn { padding: 10px 15px; cursor: pointer; border: none; border-radius: 4px; background: #007bff; color: white; font-weight: bold; }
+        .btn-pause { background: #e6a23c; color: #000; }
+
+        #total-time { font-size: 1.5rem; color: #28a745; font-family: monospace; }
+
+        @media print {
+            .controls, .column:first-child, .delete-btn, button { display: none !important; }
+            body { background: white; color: black; }
+            .column { border: none; width: 100%; }
+            .item { border-bottom: 2px solid #000; color: black; background: white !important; }
+            .duration { color: black; }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>SETLISTE PLANNER</h1>
+    <div>TOTAL TID: <span id="total-time">00:00</span></div>
+</header>
+
+<div class="container">
+    <div class="column">
+        <h2>Sang-bank (Repertoire)</h2>
+        <div id="bank" class="list"></div>
+        <div class="controls">
+            <input type="text" id="song-name" placeholder="Sangnavn">
+            <input type="text" id="song-time" placeholder="min:sek" style="max-width: 80px;">
+            <button class="btn" onclick="addNewSong()">TILFØJ</button>
+        </div>
+        <button class="btn btn-pause" style="margin: 0 15px 15px;" onclick="addPause()">+ TILFØJ PAUSE-BLOK</button>
+    </div>
+
+    <div class="column">
+        <h2>Aftenens Setliste</h2>
+        <div id="setlist" class="list"></div>
+        <div style="padding: 15px; background: #333;">
+            <button class="btn" style="width: 100%;" onclick="window.print()">PRINT SETLISTE</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    const { ipcRenderer } = require('electron');
+
+    // Default liste hvis filen mod forventning skulle være tom
+    const minDatabase = `Mere Medicin.      2.30.00\nHva Så nu?      2.30.00`;
+
+    // Opstart af drag and drop med automatisk gem-funktion ved flytning
+    try {
+        if (typeof Sortable !== 'undefined') {
+            new Sortable(document.getElementById('bank'), { 
+                group: 'shared', 
+                animation: 150,
+                onSort: saveToDisk // Auto-gemmer hvis du ændrer rækkefølgen i banken
+            });
+            new Sortable(document.getElementById('setlist'), { 
+                group: 'shared', 
+                animation: 150,
+                onSort: calculateTotalTime
+            });
+        }
+    } catch (e) {
+        console.error("Drag and drop kunne ikke starte", e);
+    }
+
+    // Indlæs data ved opstart
+    window.onload = async () => {
+        try {
+            const rawData = await ipcRenderer.invoke('load-data');
+            if (rawData && rawData.trim() !== "") {
+                parseDatabase(rawData);
+            } else {
+                parseDatabase(minDatabase);
+                saveToDisk();
+            }
+        } catch (e) {
+            console.error("Kunne ikke indlæse data:", e);
+        }
+    };
+
+    function parseDatabase(text) {
+        const lines = text.split('\n');
+        lines.forEach(line => {
+            line = line.trim();
+            if (!line) return;
+
+            if (line.includes('+')) {
+                const [name, time] = line.split('+').map(s => s.trim());
+                if (name && time) createSongElement(name, time, 'bank');
+            } else {
+                const match = line.match(/(.*?)\s+(\d{1,2})\.(\d{2})\.00$/);
+                if (match) {
+                    const name = match[1].trim();
+                    const time = `${match[2]}:${match[3]}`;
+                    createSongElement(name, time, 'bank');
+                }
+            }
+        });
+    }
+
+    function createSongElement(name, time, targetId) {
+        try {
+            const parts = time.split(':');
+            const m = parseInt(parts[0]) || 0;
+            const s = parseInt(parts[1]) || 0;
+            const seconds = (m * 60) + s;
+
+            const div = document.createElement('div');
+            div.className = 'item';
+            div.setAttribute('data-seconds', seconds);
+            div.setAttribute('data-name', name);
+            div.setAttribute('data-time', time);
+            
+            // Hvis det er en pause, skal den ikke have et slette-kryds
+            const isPause = name.includes("--- PAUSE ---");
+            
+            div.innerHTML = `
+                <div class="item-left">
+                    ${!isPause ? `<span class="delete-btn" onclick="deleteSong(this)">&times;</span>` : ''}
+                    <span>${name}</span>
+                </div>
+                <span class="duration">${time}</span>
+            `;
+            
+            document.getElementById(targetId).appendChild(div);
+            calculateTotalTime();
+        } catch(e) {
+            console.error("Fejl ved oprettelse af sang:", e);
+        }
+    }
+
+    function addNewSong() {
+        const name = document.getElementById('song-name').value.trim();
+        let time = document.getElementById('song-time').value.trim();
+        time = time.replace('.', ':');
+
+        if (!name) {
+            alert("Du mangler at skrive et sangnavn.");
+            return;
+        }
+        if (!time.includes(':')) {
+            alert("Brug kolon eller punktum i tiden (f.eks. 3:45 eller 3.45).");
+            return;
+        }
+
+        createSongElement(name, time, 'bank');
+        
+        document.getElementById('song-name').value = '';
+        document.getElementById('song-time').value = '';
+        
+        saveToDisk();
+    }
+
+    // Funktion til at slette en sang permanent
+    function deleteSong(element) {
+        if (confirm("Vil du slette denne sang permanent fra dit repertoire?")) {
+            const songItem = element.closest('.item');
+            songItem.remove();
+            saveToDisk(); // Gemmer automatisk ændringen til harddisken
+        }
+    }
+
+    function addPause() {
+        let time = prompt("Hvor lang skal pausen være? (min:sek):", "15:00");
+        if (time) {
+            time = time.replace('.', ':');
+            if(time.includes(':')) {
+                createSongElement("--- PAUSE ---", time, 'setlist');
+            }
+        }
+    }
+
+    function calculateTotalTime() {
+        let total = 0;
+        document.querySelectorAll('#setlist .item').forEach(item => {
+            total += parseInt(item.getAttribute('data-seconds')) || 0;
+        });
+        const min = Math.floor(total / 60);
+        const sek = (total % 60).toString().padStart(2, '0');
+        document.getElementById('total-time').innerText = `${min}:${sek}`;
+    }
+
+    function saveToDisk() {
+        let output = "";
+        // Vi gemmer kun sange, der ligger i 'bank' eller 'setlist' og som ikke er pauser
+        document.querySelectorAll('#bank .item, #setlist .item').forEach(item => {
+            const name = item.getAttribute('data-name');
+            if (name && !name.includes("--- PAUSE ---")) {
+                output += `${name} + ${item.getAttribute('data-time')}\n`;
+            }
+        });
+        ipcRenderer.send('save-data', output);
+    }
+</script>
+</body>
+</html>
